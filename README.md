@@ -155,16 +155,3 @@ sveltekit-pm/
 │           ├── my-tasks/     # Staff task view
 │           └── admin/        # User management
 ```
-
-## Date Strategy
-
-| Level | Planned Start | Planned End | Actual Start | Actual End | Due Date |
-|-------|:---:|:---:|:---:|:---:|:---:|
-| Project | ✅ | ✅ | ✅ | ✅ | — |
-| Phase | ✅ | ✅ | ✅ | ✅ | — |
-| Task | ✅ | ✅ | ✅ | ✅ | — |
-| Sub-task | — | — | — | — | ✅ |
-| Sub-sub-task | — | — | — | — | ✅ |
-
-Phases and tasks have full start/end (both planned and actual) for schedule variance tracking.
-Sub-tasks and below only have a due date to keep it simple for the team to fill in.
