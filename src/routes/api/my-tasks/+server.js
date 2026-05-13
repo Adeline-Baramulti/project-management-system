@@ -102,19 +102,43 @@ export async function GET({ locals, url }) {
                 [entityType, ...ids]
             );
         };
-        const [tcl, stcl, sstcl] = await Promise.all([
+        const fetchAttachments = async (entityType, ids) => {
+            if (!ids.length) return [];
+            const placeholders = ids.map(() => '?').join(',');
+            return await query(
+                `SELECT a.id, a.entity_type, a.entity_id, a.file_name, a.file_size,
+                        a.mime_type, a.created_at, u.full_name as uploaded_by_name
+                 FROM attachments a
+                 JOIN users u ON a.uploaded_by = u.id
+                 WHERE a.entity_type = ? AND a.entity_id IN (${placeholders})
+                 ORDER BY a.created_at DESC`,
+                [entityType, ...ids]
+            );
+        };
+        const [tcl, stcl, sstcl, ta, sta, ssta] = await Promise.all([
             fetchChecklist('task', groups.task),
             fetchChecklist('sub_task', groups.sub_task),
-            fetchChecklist('sub_sub_task', groups.sub_sub_task)
+            fetchChecklist('sub_sub_task', groups.sub_sub_task),
+            fetchAttachments('task', groups.task),
+            fetchAttachments('sub_task', groups.sub_task),
+            fetchAttachments('sub_sub_task', groups.sub_sub_task)
         ]);
-        const byKey = new Map();
+        const clByKey = new Map();
         for (const c of [...tcl, ...stcl, ...sstcl]) {
             const k = c.entity_type + ':' + c.entity_id;
-            if (!byKey.has(k)) byKey.set(k, []);
-            byKey.get(k).push(c);
+            if (!clByKey.has(k)) clByKey.set(k, []);
+            clByKey.get(k).push(c);
+        }
+        const attByKey = new Map();
+        for (const a of [...ta, ...sta, ...ssta]) {
+            const k = a.entity_type + ':' + a.entity_id;
+            if (!attByKey.has(k)) attByKey.set(k, []);
+            attByKey.get(k).push(a);
         }
         for (const it of allItems) {
-            it.checklist = byKey.get(it.item_type + ':' + it.id) || [];
+            const key = it.item_type + ':' + it.id;
+            it.checklist = clByKey.get(key) || [];
+            it.attachments = attByKey.get(key) || [];
         }
     }
 

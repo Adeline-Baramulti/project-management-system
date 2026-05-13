@@ -12,6 +12,8 @@
     let filterStatus = 'all';
     let selectedItem = null;          // the item currently shown in the detail modal
     let newChecklistInput = '';
+    let fileInput;                    // ref to <input type="file"> inside the modal
+    let uploading = false;
 
     onMount(() => loadTasks());
 
@@ -95,6 +97,41 @@
             method: 'DELETE', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ type: 'checklist', item_id: ci.id })
         });
+    }
+
+    // Attachment upload/delete — same /attachments endpoint as the project page.
+    async function uploadAttachment() {
+        if (!fileInput?.files?.length || !selectedItem || uploading) return;
+        uploading = true;
+        const fd = new FormData();
+        fd.append('file', fileInput.files[0]);
+        fd.append('entity_type', selectedItem.item_type);
+        fd.append('entity_id', selectedItem.id);
+        const r = await fetch(`/api/projects/${selectedItem.project_id}/attachments`, {
+            method: 'POST', body: fd
+        });
+        if (r.ok) {
+            const att = await r.json();
+            selectedItem.attachments = [att, ...(selectedItem.attachments || [])];
+            selectedItem = { ...selectedItem };
+            fileInput.value = '';
+        }
+        uploading = false;
+    }
+    async function deleteAttachment(att) {
+        if (!confirm(`Delete "${att.file_name}"?`)) return;
+        await fetch(`/api/projects/${selectedItem.project_id}/attachments`, {
+            method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ attachment_id: att.id })
+        });
+        selectedItem.attachments = selectedItem.attachments.filter(a => a.id !== att.id);
+        selectedItem = { ...selectedItem };
+    }
+    function fmtFileSize(b) {
+        if (!b) return '';
+        if (b < 1024) return b + ' B';
+        if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+        return (b/1048576).toFixed(1) + ' MB';
     }
 
     function openItem(item) { selectedItem = item; newChecklistInput = ''; }
@@ -285,6 +322,32 @@
                         </form>
                     </div>
                 </div>
+
+                <div class="field" style="margin-top:12px">
+                    <label>Attachments
+                        <span style="color:var(--text-muted); font-weight:400">— files uploaded to this {typeLabel(selectedItem.item_type).toLowerCase()}</span>
+                    </label>
+                    <div class="attach-box">
+                        {#if !selectedItem.attachments || selectedItem.attachments.length === 0}
+                            <div class="attach-empty">No files attached yet.</div>
+                        {:else}
+                            {#each selectedItem.attachments as att (att.id)}
+                                <div class="att-row">
+                                    <span class="att-icon">📎</span>
+                                    <a href="/api/projects/{selectedItem.project_id}/attachments/{att.id}"
+                                       target="_blank" rel="noopener" class="att-name" title={att.file_name}>{att.file_name}</a>
+                                    <span class="att-meta">{fmtFileSize(att.file_size)}</span>
+                                    <span class="att-meta">· {att.uploaded_by_name}</span>
+                                    <button class="xb dl" title="Delete" on:click={() => deleteAttachment(att)}>✕</button>
+                                </div>
+                            {/each}
+                        {/if}
+                        <div class="att-upload">
+                            <input type="file" bind:this={fileInput} on:change={uploadAttachment} disabled={uploading} />
+                            {#if uploading}<span style="font-size:11px; color:var(--text-muted)">Uploading…</span>{/if}
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -421,4 +484,28 @@
     }
     .xb:hover { background: var(--bg-hover); }
     .xb.dl:hover { background: var(--danger-bg); color: var(--danger-text); }
+
+    .attach-box {
+        border: 1px solid var(--border); border-radius: 8px;
+        padding: 6px;
+    }
+    .attach-empty { padding: 8px 10px; font-size: 12px; color: var(--text-muted); }
+    .att-row {
+        display: flex; align-items: center; gap: 8px;
+        padding: 6px 8px; border-radius: 4px; font-size: 12px;
+    }
+    .att-row:hover { background: var(--bg-hover); }
+    .att-icon { flex-shrink: 0; }
+    .att-name {
+        flex: 1; min-width: 0; color: var(--primary, #4f46e5);
+        text-decoration: none; font-weight: 500;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .att-name:hover { text-decoration: underline; }
+    .att-meta { font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
+    .att-upload {
+        padding: 8px; border-top: 1px solid var(--border); margin-top: 4px;
+        display: flex; align-items: center; gap: 10px;
+    }
+    .att-upload input[type="file"] { font-size: 12px; }
 </style>

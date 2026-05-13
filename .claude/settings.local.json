@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx svelte-check *)"
+      "Bash(npx svelte-check *)",
+      "Bash(node -e ' *)",
+      "Bash(npm run *)"
     ]
   }
 }

@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
-import { query, insert } from '$lib/server/db.js';
+import { query, queryOne, insert } from '$lib/server/db.js';
 import { logActivity } from '$lib/server/progress.js';
-import { writeFile, mkdir } from 'fs/promises';
+import { writeFile, mkdir, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 
@@ -87,9 +87,30 @@ export async function POST({ params, request, locals }) {
     return json({ id, file_name: file.name, file_size: buffer.length, mime_type: file.type }, { status: 201 });
 }
 
-/** DELETE /api/projects/[id]/attachments */
+/** DELETE /api/projects/[id]/attachments - Removes DB row AND the underlying file on disk. */
 export async function DELETE({ params, request, locals }) {
     const { attachment_id } = await request.json();
+
+    // Read first so we have the file_path before the row disappears.
+    const att = await queryOne(
+        'SELECT file_path, file_name FROM attachments WHERE id = ? AND project_id = ?',
+        [attachment_id, params.id]
+    );
+    if (!att) return json({ error: 'Attachment not found' }, { status: 404 });
+
     await query('DELETE FROM attachments WHERE id = ? AND project_id = ?', [attachment_id, params.id]);
+
+    // Best-effort file removal. Don't fail the request if the file is already gone
+    // (could happen if someone deleted it manually, or for link-only attachments).
+    if (att.file_path && existsSync(att.file_path)) {
+        try { await unlink(att.file_path); }
+        catch (e) { console.warn('[attachments] failed to unlink', att.file_path, e?.message); }
+    }
+
+    if (locals.user) {
+        await logActivity(params.id, locals.user.id, 'project', params.id, 'deleted',
+            `Attachment "${att.file_name}" deleted`);
+    }
+
     return json({ success: true });
 }

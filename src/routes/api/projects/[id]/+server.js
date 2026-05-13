@@ -2,6 +2,11 @@ import { json } from '@sveltejs/kit';
 import { query, queryOne } from '$lib/server/db.js';
 import { requireRole } from '$lib/server/auth.js';
 import { recalcProjectProgress, logActivity } from '$lib/server/progress.js';
+import { rm } from 'fs/promises';
+import { existsSync } from 'fs';
+import path from 'path';
+
+const UPLOAD_DIR = process.env.UPLOAD_DIR || './uploads';
 
 /** GET /api/projects/[id] - Get project with full WBS tree */
 export async function GET({ params, locals }) {
@@ -159,12 +164,21 @@ export async function PATCH({ params, request, locals }) {
     return json(project);
 }
 
-/** DELETE /api/projects/[id] */
+/** DELETE /api/projects/[id] - Cascades DB rows AND removes the project's upload folder. */
 export async function DELETE({ params, locals }) {
     if (!requireRole(locals.user, 'admin')) {
         return json({ error: 'Only admins can delete projects' }, { status: 403 });
     }
 
     await query('DELETE FROM projects WHERE id = ?', [params.id]);
+
+    // Remove the project's upload folder (and everything inside).
+    // Best-effort: failure here shouldn't fail the API call — the DB is already gone.
+    const projUploads = path.join(UPLOAD_DIR, String(params.id));
+    if (existsSync(projUploads)) {
+        try { await rm(projUploads, { recursive: true, force: true }); }
+        catch (e) { console.warn('[projects DELETE] failed to remove', projUploads, e?.message); }
+    }
+
     return json({ success: true });
 }
