@@ -1,6 +1,7 @@
 <script>
     import { onMount } from 'svelte';
     import { browser } from '$app/environment';
+    import { goto } from '$app/navigation';
 
     export let data;
     $: user = data.user;
@@ -9,7 +10,8 @@
     let summary = {};
     let loading = true;
     let filterStatus = 'all';
-    let selectedItem = null;
+    let selectedItem = null;          // the item currently shown in the detail modal
+    let newChecklistInput = '';
 
     onMount(() => loadTasks());
 
@@ -22,29 +24,102 @@
             const data = await res.json();
             items = data.items;
             summary = data.summary;
+            // If a modal is open, refresh its data from the new list
+            if (selectedItem) {
+                const fresh = items.find(i => i.item_type === selectedItem.item_type && i.id === selectedItem.id);
+                if (fresh) selectedItem = fresh;
+            }
         }
         loading = false;
     }
 
-    async function updateStatus(item, newStatus) {
+    async function patchItem(item, fields) {
         await fetch(`/api/projects/${item.project_id}/wbs`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: item.item_type, item_id: item.id, status: newStatus })
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: item.item_type, item_id: item.id, ...fields })
         });
+    }
+
+    // Inline status change from card — fire-and-update.
+    async function updateStatus(item, newStatus) {
+        await patchItem(item, { status: newStatus });
         await loadTasks();
     }
+
+    // Modal edits — optimistic local update + background API call.
+    async function updateField(field, value) {
+        if (!selectedItem) return;
+        selectedItem[field] = value === '' ? null : value;
+        selectedItem = { ...selectedItem };
+        await patchItem(selectedItem, { [field]: selectedItem[field] });
+        // Mirror change into the list so summary cards stay accurate
+        const i = items.findIndex(x => x.item_type === selectedItem.item_type && x.id === selectedItem.id);
+        if (i >= 0) { items[i] = selectedItem; items = [...items]; }
+    }
+
+    // Checklist add/toggle/delete — uses the same /wbs endpoint.
+    async function addChecklistItem() {
+        const title = newChecklistInput.trim();
+        if (!title || !selectedItem) return;
+        const r = await fetch(`/api/projects/${selectedItem.project_id}/wbs`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                type: 'checklist',
+                parent_id: selectedItem.id,
+                checklist_parent_type: selectedItem.item_type,
+                name: title
+            })
+        });
+        if (r.ok) {
+            const res = await r.json();
+            selectedItem.checklist = [...(selectedItem.checklist || []), {
+                id: res.id, entity_type: selectedItem.item_type, entity_id: selectedItem.id,
+                title, is_checked: false, sort_order: (selectedItem.checklist || []).length
+            }];
+            selectedItem = { ...selectedItem };
+            newChecklistInput = '';
+        }
+    }
+    async function toggleChecklistItem(ci) {
+        ci.is_checked = !ci.is_checked;
+        selectedItem = { ...selectedItem };
+        await fetch(`/api/projects/${selectedItem.project_id}/wbs`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'checklist', item_id: ci.id, is_checked: ci.is_checked })
+        });
+    }
+    async function deleteChecklistItem(ci) {
+        selectedItem.checklist = selectedItem.checklist.filter(x => x.id !== ci.id);
+        selectedItem = { ...selectedItem };
+        await fetch(`/api/projects/${selectedItem.project_id}/wbs`, {
+            method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'checklist', item_id: ci.id })
+        });
+    }
+
+    function openItem(item) { selectedItem = item; newChecklistInput = ''; }
+    function closeItem() { selectedItem = null; }
+    function openInProject() {
+        if (selectedItem) goto(`/projects/${selectedItem.project_id}`);
+    }
+    function onModalBg(e) { if (e.target === e.currentTarget) closeItem(); }
+    function onModalKey(e) { if (e.key === 'Escape') closeItem(); }
 
     // Guard with `browser` because $: blocks run once during SSR too — without it,
     // loadTasks() fires server-side and crashes on the relative-URL fetch.
     $: if (browser) { filterStatus; loadTasks(); }
 
+    const STATUSES = ['Not Started','In Progress','Completed','On Hold','Cancelled'];
+    const PRIORITIES = ['Low','Medium','High','Critical','Urgent'];
     const statusClass = (s) => `badge badge-${s?.toLowerCase().replace(/\s/g, '-')}`;
     const priorityClass = (p) => `badge badge-${p?.toLowerCase()}`;
     const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '—';
+    const toDateInput = (d) => { if (!d) return ''; const s = String(d); return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0,10) : ''; };
     const isOverdue = (item) => item.planned_end && new Date(item.planned_end) < new Date() && item.status !== 'Completed';
     const typeLabel = (t) => ({ task: 'Task', sub_task: 'Sub-task', sub_sub_task: 'Sub-sub-task' })[t] || t;
 </script>
+
+<svelte:window on:keydown={onModalKey} />
 
 <div class="page">
     <div class="page-header">
@@ -103,7 +178,10 @@
     {:else}
         <div class="task-list">
             {#each items as item}
-                <div class="task-card" class:overdue={isOverdue(item)}>
+                {@const cl = item.checklist || []}
+                {@const clDone = cl.filter(c => c.is_checked).length}
+                <div class="task-card" class:overdue={isOverdue(item)} on:click={() => openItem(item)} role="button" tabindex="0"
+                     on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && openItem(item)}>
                     <div class="task-main">
                         <div class="task-header">
                             <span class="task-type-badge">{typeLabel(item.item_type)}</span>
@@ -111,11 +189,14 @@
                         </div>
                         <div class="task-name">{item.name}</div>
                         <div class="task-path">{item.phase_name}{item.parent_task_name ? ` → ${item.parent_task_name}` : ''}{item.parent_sub_task_name ? ` → ${item.parent_sub_task_name}` : ''}</div>
+                        {#if cl.length > 0}
+                            <div class="task-checklist-summary">☑ {clDone}/{cl.length} subtasks done</div>
+                        {/if}
                         {#if item.notes}
                             <div class="task-notes">{item.notes}</div>
                         {/if}
                     </div>
-                    <div class="task-meta">
+                    <div class="task-meta" on:click|stopPropagation role="presentation">
                         <span class={priorityClass(item.priority)}>{item.priority}</span>
                         <span class={statusClass(item.status)}>{item.status}</span>
                         <div class="task-date" class:overdue-date={isOverdue(item)}>
@@ -127,10 +208,7 @@
                         </div>
                         <select class="input input-sm" style="width:120px" value={item.status}
                                 on:change={(e) => updateStatus(item, e.target.value)}>
-                            <option>Not Started</option>
-                            <option>In Progress</option>
-                            <option>Completed</option>
-                            <option>On Hold</option>
+                            {#each STATUSES as s}<option>{s}</option>{/each}
                         </select>
                     </div>
                 </div>
@@ -138,6 +216,79 @@
         </div>
     {/if}
 </div>
+
+<!-- ─────────── DETAIL MODAL ─────────── -->
+{#if selectedItem}
+    <div class="modal-bg" on:click={onModalBg} role="presentation">
+        <div class="modal" role="dialog" aria-modal="true">
+            <div class="modal-header">
+                <div style="flex:1; min-width:0">
+                    <div class="modal-crumb">{selectedItem.project_code} · {selectedItem.project_name}</div>
+                    <div class="modal-crumb">{selectedItem.phase_name}{selectedItem.parent_task_name ? ` → ${selectedItem.parent_task_name}` : ''}{selectedItem.parent_sub_task_name ? ` → ${selectedItem.parent_sub_task_name}` : ''}</div>
+                </div>
+                <button class="modal-link" on:click={openInProject} title="Open in project view">↗ Open in project</button>
+                <button class="modal-close" on:click={closeItem} aria-label="Close">✕</button>
+            </div>
+
+            <div class="modal-body">
+                <input class="modal-title" placeholder="Task name" value={selectedItem.name || ''}
+                       on:change={(e) => updateField('name', e.target.value)} />
+
+                <div class="modal-grid">
+                    <div class="field"><label>Status</label>
+                        <select class="input input-sm" value={selectedItem.status} on:change={e => updateField('status', e.target.value)}>
+                            {#each STATUSES as s}<option>{s}</option>{/each}
+                        </select>
+                    </div>
+                    <div class="field"><label>Priority</label>
+                        <select class="input input-sm" value={selectedItem.priority || ''} on:change={e => updateField('priority', e.target.value)}>
+                            <option value="">—</option>
+                            {#each PRIORITIES as p}<option>{p}</option>{/each}
+                        </select>
+                    </div>
+                    {#if selectedItem.planned_start !== undefined}
+                        <div class="field"><label>Planned start</label>
+                            <input type="date" class="input input-sm" value={toDateInput(selectedItem.planned_start)} on:change={e => updateField('planned_start', e.target.value)} />
+                        </div>
+                        <div class="field"><label>Planned end</label>
+                            <input type="date" class="input input-sm" value={toDateInput(selectedItem.planned_end)} on:change={e => updateField('planned_end', e.target.value)} />
+                        </div>
+                        <div class="field"><label>Actual start</label>
+                            <input type="date" class="input input-sm ac" value={toDateInput(selectedItem.actual_start)} on:change={e => updateField('actual_start', e.target.value)} />
+                        </div>
+                        <div class="field"><label>Actual end</label>
+                            <input type="date" class="input input-sm ac" value={toDateInput(selectedItem.actual_end)} on:change={e => updateField('actual_end', e.target.value)} />
+                        </div>
+                    {/if}
+                </div>
+
+                <div class="field" style="margin-top:12px">
+                    <label>Notes</label>
+                    <textarea class="input" rows="3" placeholder="Add a quick note..."
+                              value={selectedItem.notes || ''}
+                              on:change={e => updateField('notes', e.target.value)}></textarea>
+                </div>
+
+                <div class="field" style="margin-top:12px">
+                    <label>Checklist <span style="color:var(--text-muted); font-weight:400">— small steps to get this done</span></label>
+                    <div class="checklist-box">
+                        {#each selectedItem.checklist || [] as ci (ci.id)}
+                            <div class="cl-row" class:done={ci.is_checked}>
+                                <input type="checkbox" checked={ci.is_checked} on:change={() => toggleChecklistItem(ci)} />
+                                <span style="flex:1">{ci.title}</span>
+                                <button class="xb dl" title="Delete" on:click={() => deleteChecklistItem(ci)}>✕</button>
+                            </div>
+                        {/each}
+                        <form on:submit|preventDefault={addChecklistItem} class="cl-add">
+                            <input class="input input-sm" placeholder="Add a checklist item..." bind:value={newChecklistInput} />
+                            <button class="btn btn-primary btn-sm" type="submit" disabled={!newChecklistInput.trim()}>＋</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+{/if}
 
 <style>
     .page { padding: 24px; }
@@ -185,4 +336,89 @@
     .task-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
     .task-date { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
     .overdue-date { color: var(--danger-text); font-weight: 600; }
+    .task-card { cursor: pointer; }
+    .task-card:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+    .task-checklist-summary { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+    /* ─── Detail modal ─── */
+    .modal-bg {
+        position: fixed; inset: 0;
+        background: rgba(15, 23, 42, 0.55);
+        display: flex; justify-content: center; align-items: flex-start;
+        padding: 60px 16px 16px;
+        z-index: 100;
+        overflow-y: auto;
+    }
+    .modal {
+        background: var(--bg-card);
+        border-radius: 12px;
+        width: 100%;
+        max-width: 640px;
+        box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+        display: flex; flex-direction: column;
+        max-height: calc(100vh - 80px);
+    }
+    .modal-header {
+        display: flex; align-items: flex-start; gap: 10px;
+        padding: 14px 18px; border-bottom: 1px solid var(--border);
+    }
+    .modal-crumb { font-size: 11px; color: var(--text-muted); }
+    .modal-crumb + .modal-crumb { margin-top: 2px; }
+    .modal-link {
+        background: transparent; border: 1px solid var(--border);
+        color: var(--text-secondary); border-radius: 6px;
+        padding: 4px 10px; font-size: 11px; cursor: pointer;
+        white-space: nowrap;
+    }
+    .modal-link:hover { background: var(--bg-hover); color: var(--primary); }
+    .modal-close {
+        background: transparent; border: none; color: var(--text-muted);
+        font-size: 18px; cursor: pointer; width: 28px; height: 28px;
+        border-radius: 6px;
+    }
+    .modal-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+    .modal-body { padding: 16px 18px; overflow-y: auto; }
+    .modal-title {
+        width: 100%; border: 1px solid transparent;
+        font-size: 18px; font-weight: 700; padding: 6px 8px;
+        margin-bottom: 14px; background: transparent;
+        border-radius: 6px; color: var(--text-primary);
+    }
+    .modal-title:hover, .modal-title:focus {
+        border-color: var(--border); background: var(--bg-card);
+        outline: none;
+    }
+    .modal-grid {
+        display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px;
+    }
+    .field label {
+        display: block; font-size: 11px; font-weight: 600;
+        color: var(--text-muted); margin-bottom: 4px;
+        text-transform: uppercase; letter-spacing: 0.3px;
+    }
+    .field .ac { background-color: #f0fdf4; }
+
+    .checklist-box {
+        border: 1px solid var(--border); border-radius: 8px;
+        padding: 6px;
+    }
+    .cl-row {
+        display: flex; align-items: center; gap: 8px;
+        padding: 6px 8px; border-radius: 4px; font-size: 13px;
+    }
+    .cl-row:hover { background: var(--bg-hover); }
+    .cl-row.done { color: var(--text-muted); text-decoration: line-through; }
+    .cl-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+    .cl-add {
+        display: flex; gap: 6px;
+        padding: 6px 8px; border-top: 1px solid var(--border); margin-top: 4px;
+    }
+    .cl-add .input { flex: 1; }
+    .xb {
+        background: transparent; border: none; cursor: pointer;
+        color: var(--text-muted); font-size: 14px; padding: 2px 6px;
+        border-radius: 4px;
+    }
+    .xb:hover { background: var(--bg-hover); }
+    .xb.dl:hover { background: var(--danger-bg); color: var(--danger-text); }
 </style>

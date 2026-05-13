@@ -80,6 +80,110 @@
         });
     }
 
+    // ─── SPRINT API ───
+    async function apiCreateSprint(payload) {
+        const r = await fetch(`/api/projects/${projectId}/sprints`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        return r.ok ? r.json() : null;
+    }
+    function apiPatchSprint(sprintId, fields) {
+        fetch(`/api/projects/${projectId}/sprints/${sprintId}`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(fields)
+        });
+    }
+    function apiDeleteSprint(sprintId) {
+        return fetch(`/api/projects/${projectId}/sprints/${sprintId}`, { method: 'DELETE' });
+    }
+
+    // ─── BACKLOG / SPRINT TASK OPERATIONS ───
+    // Find the task object inside project.phases (regardless of which phase it's in).
+    function findTaskById(taskId) {
+        for (const ph of project.phases || []) {
+            for (const t of ph.tasks || []) if (t.id === taskId) return { phase: ph, task: t };
+        }
+        return null;
+    }
+    // Move a task from its current phase to another phase. Used to "promote" a backlog task.
+    function moveTaskToPhase(task, targetPhaseId) {
+        const found = findTaskById(task.id);
+        if (!found || found.phase.id === targetPhaseId) return;
+        const target = project.phases.find(p => p.id === targetPhaseId);
+        if (!target) return;
+        found.phase.tasks = found.phase.tasks.filter(t => t.id !== task.id);
+        task.phase_id = targetPhaseId;
+        target.tasks = [...(target.tasks || []), task];
+        project = { ...project };
+        apiPatch('task', task.id, { phase_id: targetPhaseId });
+    }
+    // Assign / unassign a task to a sprint (sprintId can be null).
+    function assignTaskToSprint(task, sprintId) {
+        task.sprint_id = sprintId;
+        project = { ...project };
+        apiPatch('task', task.id, { sprint_id: sprintId });
+    }
+    // Quick-add a task into the Backlog phase. Returns the optimistic local task.
+    function addBacklogTask(name) {
+        if (!backlogPhase) return;
+        const id = nextId();
+        const t = {
+            id, name: name || '', status: 'Not Started', priority: 'Medium',
+            assigned_to: null, assignee_name: '',
+            planned_start: null, planned_end: null, actual_start: null, actual_end: null,
+            sort_order: (backlogPhase.tasks || []).length, notes: '',
+            subTasks: [], checklist: [], sprint_id: null, story_points: null
+        };
+        backlogPhase.tasks = [...(backlogPhase.tasks || []), t];
+        project = { ...project };
+        apiPost('task', backlogPhase.id, { name: t.name }).then(res => {
+            if (res?.id) { t.id = res.id; project = { ...project }; }
+        });
+    }
+    // Sprint CRUD (local-first, then API).
+    async function createSprint(name, start_date, end_date, goal) {
+        if (!name?.trim()) return;
+        const tempId = nextId();
+        const local = {
+            id: tempId, name: name.trim(), goal: goal || null,
+            start_date: start_date || null, end_date: end_date || null,
+            status: 'Planned', task_count: 0, task_done: 0, total_points: 0, done_points: 0
+        };
+        project.sprints = [...(project.sprints || []), local];
+        project = { ...project };
+        const res = await apiCreateSprint({ name: local.name, goal: local.goal,
+            start_date: local.start_date, end_date: local.end_date });
+        if (res?.id) { local.id = res.id; project = { ...project }; }
+    }
+    function updateSprint(sprint, field, value) {
+        sprint[field] = value === '' ? null : value;
+        // Enforce single Active sprint client-side too.
+        if (field === 'status' && value === 'Active') {
+            for (const s of project.sprints) if (s.id !== sprint.id && s.status === 'Active') s.status = 'Planned';
+        }
+        project = { ...project };
+        apiPatchSprint(sprint.id, { [field]: sprint[field] });
+    }
+    async function deleteSprint(sprint) {
+        if (!confirm(`Delete sprint "${sprint.name}"? Tasks assigned to it will return to no sprint.`)) return;
+        // Locally detach tasks from this sprint
+        for (const ph of project.phases || []) {
+            for (const t of ph.tasks || []) if (t.sprint_id === sprint.id) t.sprint_id = null;
+        }
+        project.sprints = project.sprints.filter(s => s.id !== sprint.id);
+        project = { ...project };
+        await apiDeleteSprint(sprint.id);
+    }
+    // All tasks across phases, flat — for backlog/sprint pickers.
+    function allTasksFlat() {
+        const out = [];
+        for (const ph of project.phases || []) {
+            for (const t of ph.tasks || []) out.push({ task: t, phase: ph });
+        }
+        return out;
+    }
+
     // ─── LOCAL STATE MUTATIONS (React-style) ───
     function addPhase() {
         const id = nextId();
@@ -180,12 +284,12 @@
         apiPatch('sub_sub_task', sst.id, { [field]: value });
     }
 
-    function deletePhase(idx) {
+    function deletePhase(phase) {
+        if (phase.is_backlog) { alert('The Backlog phase cannot be deleted.'); return; }
         if (!confirm('Delete this phase?')) return;
-        const ph = project.phases[idx];
-        project.phases = project.phases.filter((_, i) => i !== idx);
+        project.phases = project.phases.filter(p => p.id !== phase.id);
         project = { ...project };
-        apiDelete('phase', ph.id);
+        apiDelete('phase', phase.id);
     }
 
     function deleteTask(phase, idx) {
@@ -327,6 +431,12 @@
     // Svelte 5 legacy mode sees the same array ref and skips invalidating dependents
     // (the Gantt's keyed {#each gRowsList} won't redraw bars after edits).
     $: phases = project?.phases ? [...project.phases] : [];
+    // Hybrid-scrum: the Backlog phase is a dedicated "drop ideas here" bucket
+    // (weight 0, doesn't affect progress). WBS/Gantt views hide it; Backlog tab shows it.
+    $: backlogPhase = phases.find(p => p.is_backlog) || null;
+    $: wbsPhases   = phases.filter(p => !p.is_backlog);
+    $: sprints     = project?.sprints || [];
+    $: activeSprint = sprints.find(s => s.status === 'Active') || null;
     $: projectProgress = calcProjectProgress(phases);
     // Bump _tick on every project change so the Gantt's {#key _tick} blocks rebuild
     // after dropdown picks, name edits, status changes — not just drag. Without this,
@@ -347,7 +457,7 @@
     }
     $: { gRange; gDays = dayList(gRange.start, gRange.end); }
     $: { gDays; gMonths = monthGroups(gDays); }
-    $: { phases; exp; _tick; gRowsList = ganttRows(); }
+    $: { phases; wbsPhases; exp; _tick; gRowsList = ganttRows(); }
 
     function sstP(sst) { return sst.status === 'Completed' ? 100 : 0; }
     function stP(st) { return st.subSubTasks?.length ? st.subSubTasks.reduce((s,x) => s+sstP(x),0)/st.subSubTasks.length : (st.status==='Completed'?100:0); }
@@ -403,18 +513,180 @@
     const pCol = v => v>=100?'#22c55e':v>=60?'#3b82f6':v>=30?'#f59e0b':'#94a3b8';
     $: canEdit = user?.role==='admin'||user?.role==='project_manager';
     const STS = ['Not Started','In Progress','Completed','On Hold','Cancelled'];
-    const PRI = ['Low','Medium','High','Critical'];
+    const PRI = ['Low','Medium','High','Critical','Urgent'];
+
+    let kanbanSprintFilter = 'all';  // 'all' | 'none' | <sprintId>
+    // ─── DASHBOARD DATA ───
+    // Flattens leaf work items (the deepest non-empty child of each branch) with their
+    // effective priority and assignee (inheriting from parents when blank).
+    // Excludes Backlog phase. This shape is intentionally project-agnostic so the
+    // org-wide dashboard can sum across multiple projects later by concatenating leaves[].
+    function getLeafItems() {
+        const out = [];
+        for (const ph of wbsPhases) {
+            for (const t of ph.tasks || []) {
+                if (!t.subTasks?.length) {
+                    out.push({
+                        id: t.id, name: t.name, status: t.status,
+                        priority: t.priority || 'Medium',
+                        assigned_to: t.assigned_to || null,
+                        assignee_name: t.assignee_name || null,
+                        phase_name: ph.name
+                    });
+                    continue;
+                }
+                for (const st of t.subTasks) {
+                    if (!st.subSubTasks?.length) {
+                        out.push({
+                            id: st.id, name: st.name, status: st.status,
+                            priority: st.priority || t.priority || 'Medium',
+                            assigned_to: st.assigned_to || t.assigned_to || null,
+                            assignee_name: st.assignee_name || t.assignee_name || null,
+                            phase_name: ph.name
+                        });
+                        continue;
+                    }
+                    for (const sst of st.subSubTasks) {
+                        out.push({
+                            id: sst.id, name: sst.name, status: sst.status,
+                            priority: sst.priority || st.priority || t.priority || 'Medium',
+                            assigned_to: sst.assigned_to || st.assigned_to || t.assigned_to || null,
+                            assignee_name: sst.assignee_name || st.assignee_name || t.assignee_name || null,
+                            phase_name: ph.name
+                        });
+                    }
+                }
+            }
+        }
+        return out;
+    }
+    function computeDashboard() {
+        const leaves = getLeafItems();
+        const statusCounts = Object.fromEntries(STS.map(s => [s, 0]));
+        const priorityCounts = Object.fromEntries(PRI.map(p => [p, 0]));
+        const byAssignee = new Map();
+        for (const it of leaves) {
+            statusCounts[it.status] = (statusCounts[it.status] || 0) + 1;
+            priorityCounts[it.priority] = (priorityCounts[it.priority] || 0) + 1;
+            const key = it.assigned_to || 0;
+            const label = it.assignee_name || (key === 0 ? 'Unassigned' : '—');
+            if (!byAssignee.has(key)) {
+                byAssignee.set(key, {
+                    id: key, name: label, total: 0,
+                    statuses: Object.fromEntries(STS.map(s => [s, 0]))
+                });
+            }
+            const row = byAssignee.get(key);
+            row.total++;
+            row.statuses[it.status]++;
+        }
+        const assignees = [...byAssignee.values()].sort((a, b) => b.total - a.total);
+        return { total: leaves.length, statusCounts, priorityCounts, assignees };
+    }
+    // Re-derive on any project change (using _tick as a dependency token).
+    $: dashboardData = (wbsPhases, _tick, computeDashboard());
+
+    // Unassigned — work happens at leaves, so leaf-only makes sense.
+    $: unassignedLeaves = (wbsPhases, _tick, getLeafItems().filter(it => !it.assigned_to && it.status !== 'Completed' && it.status !== 'Cancelled'));
+
+    // Overdue — any item at any level (task, sub-task, sub-sub-task) whose own
+    // planned_end has passed and isn't done. Parents can set dates too, so we walk
+    // every level rather than restricting to leaves.
+    function getOverdue() {
+        const out = [];
+        // Local-date YYYY-MM-DD avoids UTC-edge issues (e.g. 6am Jakarta = previous day UTC).
+        const now = new Date();
+        const todayStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+        const push = (it, phaseName, kind, parentName) => {
+            if (!it.planned_end) return;
+            if (it.status === 'Completed' || it.status === 'Cancelled') return;
+            const pe = String(it.planned_end).slice(0, 10);
+            if (pe < todayStr) {
+                out.push({
+                    ...it, planned_end: pe,
+                    phase_name: phaseName, item_kind: kind, parent_name: parentName
+                });
+            }
+        };
+        for (const ph of wbsPhases) {
+            for (const t of ph.tasks || []) {
+                push(t, ph.name, 'task', null);
+                for (const st of t.subTasks || []) {
+                    push(st, ph.name, 'sub_task', t.name);
+                    for (const sst of st.subSubTasks || []) {
+                        push(sst, ph.name, 'sub_sub_task', st.name);
+                    }
+                }
+            }
+        }
+        return out.sort((a, b) => a.planned_end.localeCompare(b.planned_end));
+    }
+    $: overdueLeaves = (wbsPhases, _tick, getOverdue());
+
+    // Project discussion
+    let newComment = '';
+    let postingComment = false;
+    async function postComment() {
+        const text = newComment.trim();
+        if (!text || postingComment) return;
+        postingComment = true;
+        const r = await fetch(`/api/projects/${projectId}/comments`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: text })
+        });
+        if (r.ok) {
+            const c = await r.json();
+            project.comments = [...(project.comments || []), c];
+            project = { ...project };
+            newComment = '';
+        }
+        postingComment = false;
+    }
+    async function deleteComment(comment) {
+        if (!confirm('Delete this comment?')) return;
+        const r = await fetch(`/api/projects/${projectId}/comments?comment_id=${comment.id}`, { method: 'DELETE' });
+        if (r.ok) {
+            project.comments = project.comments.filter(c => c.id !== comment.id);
+            project = { ...project };
+        }
+    }
+    function relTime(ts) {
+        if (!ts) return '';
+        const d = new Date(ts);
+        const diff = (Date.now() - d.getTime()) / 1000;
+        if (diff < 60) return 'just now';
+        if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+        if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+        if (diff < 604800) return Math.floor(diff/86400) + 'd ago';
+        return d.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
+    }
+
+    // Chart palettes — kept in sync with the badge/select CSS classes.
+    const STATUS_COLORS = {
+        'Not Started': '#94a3b8', 'In Progress': '#3b82f6',
+        'Completed': '#22c55e', 'On Hold': '#eab308', 'Cancelled': '#6b7280'
+    };
+    const PRIORITY_COLORS = {
+        'Low': '#cbd5e1', 'Medium': '#93c5fd', 'High': '#fdba74',
+        'Critical': '#fca5a5', 'Urgent': '#7f1d1d'
+    };
 
     function getKanban() {
         const r = [];
         for (const ph of phases) for (const t of ph.tasks||[]) {
-            if (!t.subTasks?.length) r.push({...t,itype:'task',pn:ph.name});
+            // For Kanban: top-level Task carries the sprint_id (sub-tasks inherit display via parent).
+            const isBacklog = !!ph.is_backlog;
+            if (!t.subTasks?.length) r.push({...t,itype:'task',pn:ph.name,sprint_id:t.sprint_id||null,isBacklog});
             for (const s of t.subTasks||[]) {
-                if (!s.subSubTasks?.length) r.push({...s,itype:'sub_task',pn:ph.name,tn:t.name});
-                for (const ss of s.subSubTasks||[]) r.push({...ss,itype:'sub_sub_task',pn:ph.name,tn:t.name});
+                if (!s.subSubTasks?.length) r.push({...s,itype:'sub_task',pn:ph.name,tn:t.name,sprint_id:t.sprint_id||null,isBacklog});
+                for (const ss of s.subSubTasks||[]) r.push({...ss,itype:'sub_sub_task',pn:ph.name,tn:t.name,sprint_id:t.sprint_id||null,isBacklog});
             }
         }
-        return r;
+        // Apply sprint filter
+        if (kanbanSprintFilter === 'all') return r;
+        if (kanbanSprintFilter === 'none') return r.filter(i => !i.sprint_id);
+        const sid = parseInt(kanbanSprintFilter);
+        return r.filter(i => i.sprint_id === sid);
     }
     // ─── GANTT (daily timeline with drag-to-edit) ───
     let DAY_W = 28;               // pixels per day column (zoomable, 12–60)
@@ -501,7 +773,7 @@
                 if (it[f]) all.push(toD(it[f]));
             }
         };
-        for (const ph of phases) {
+        for (const ph of wbsPhases) {
             collect(ph);
             for (const t of ph.tasks||[]) {
                 collect(t);
@@ -520,7 +792,7 @@
     }
     function ganttRows() {
         const rows = [];
-        phases.forEach((ph, pi) => {
+        wbsPhases.forEach((ph, pi) => {
             rows.push({ type:'phase', item:ph, lvl:0, wbs:`${pi+1}`, name:ph.name, assignee:'', isLeaf:false, hasToggle:!!(ph.tasks?.length), key:'p'+ph.id });
             if (exp['p'+ph.id]) {
                 (ph.tasks||[]).forEach((t, ti) => {
@@ -647,7 +919,7 @@
             <div style="margin-left:auto; display:flex; gap:8px"><span class={sc(project.status)}>{project.status}</span><span class={hcl(project.health)}>{project.health}</span></div>
         </div>
         <div class="tabs" style="margin-top:12px">
-            {#each [{id:'overview',l:'📊 Overview'},{id:'wbs',l:'📋 Work Breakdown Structure'},{id:'kanban',l:'📌 Kanban'},{id:'gantt',l:'📅 Gantt'}] as t}
+            {#each [{id:'overview',l:'📊 Overview'},{id:'backlog',l:'📥 Backlog'},{id:'sprints',l:'🏁 Sprints'},{id:'wbs',l:'📋 Work Breakdown Structure'},{id:'kanban',l:'📌 Kanban'},{id:'gantt',l:'📅 Gantt'}] as t}
                 <button class="tab" class:active={activeTab===t.id} on:click={() => activeTab=t.id}>{t.l}</button>
             {/each}
         </div>
@@ -656,11 +928,11 @@
     <div class="pc">
         <!-- OVERVIEW -->
         {#if activeTab==='overview'}
-            {@const wbsStart = phases.length ? phases.map(effPlanStart).filter(Boolean).reduce((a,b)=>a<b?a:b, null) : null}
-            {@const wbsEnd   = phases.length ? phases.map(effPlanEnd).filter(Boolean).reduce((a,b)=>a>b?a:b, null) : null}
+            {@const wbsStart = wbsPhases.length ? wbsPhases.map(effPlanStart).filter(Boolean).reduce((a,b)=>a<b?a:b, null) : null}
+            {@const wbsEnd   = wbsPhases.length ? wbsPhases.map(effPlanEnd).filter(Boolean).reduce((a,b)=>a>b?a:b, null) : null}
             {@const taskCounts = (() => {
                 let tasks = 0, subs = 0, subsubs = 0, leaves = 0;
-                for (const p of phases) {
+                for (const p of wbsPhases) {
                     for (const t of p.tasks||[]) {
                         tasks++;
                         if (t.subTasks?.length) {
@@ -673,7 +945,7 @@
                         } else { leaves++; }
                     }
                 }
-                return { phases: phases.length, tasks, subs, subsubs, leaves };
+                return { phases: wbsPhases.length, tasks, subs, subsubs, leaves };
             })()}
             <div class="stats-grid" style="grid-template-columns:repeat(4,1fr)">
                 <div class="card"><div class="sl">Progress</div><div class="sv">{Math.round(projectProgress)}%</div><div class="progress-bar" style="margin-top:8px"><div class="progress-bar-track" style="height:8px"><div class="progress-bar-fill" style="width:{projectProgress}%; background:{pCol(projectProgress)}; height:100%"></div></div></div></div>
@@ -723,12 +995,425 @@
                         {:else}<span class="ov-val">{project.department||'—'}</span>{/if}
                     </div>
                 </div>
-                <div class="card"><h3 style="font-size:14px; font-weight:700; margin-bottom:16px">Phases</h3>{#each phases as phase}{@const pp=phP(phase)}<div style="margin-bottom:14px"><div style="display:flex; justify-content:space-between; margin-bottom:4px"><span style="font-size:13px; font-weight:500">{phase.name||'—'}</span><span style="font-size:11px; color:var(--text-muted)">{Math.round(phase.weight)}%</span></div><div class="progress-bar"><div class="progress-bar-track" style="height:7px"><div class="progress-bar-fill" style="width:{pp}%; background:{pCol(pp)}; height:100%"></div></div><span class="progress-bar-label">{Math.round(pp)}%</span></div></div>{/each}</div>
+                <div class="card"><h3 style="font-size:14px; font-weight:700; margin-bottom:16px">Phases</h3>{#each wbsPhases as phase}{@const pp=phP(phase)}<div style="margin-bottom:14px"><div style="display:flex; justify-content:space-between; margin-bottom:4px"><span style="font-size:13px; font-weight:500">{phase.name||'—'}</span><span style="font-size:11px; color:var(--text-muted)">{Math.round(phase.weight)}%</span></div><div class="progress-bar"><div class="progress-bar-track" style="height:7px"><div class="progress-bar-fill" style="width:{pp}%; background:{pCol(pp)}; height:100%"></div></div><span class="progress-bar-label">{Math.round(pp)}%</span></div></div>{/each}</div>
             </div>
+
+            <!-- DASHBOARD CHARTS ─ status / priority / workload breakdown
+                 Driven by computeDashboard() which flattens leaf work items.
+                 Same shape is intended to feed the org-wide dashboard later. -->
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px">
+                <!-- Status donut -->
+                <div class="card">
+                    <h3 style="font-size:14px; font-weight:700; margin-bottom:16px">Status Overview</h3>
+                    {#if dashboardData.total === 0}
+                        <div style="text-align:center; color:var(--text-muted); padding:24px; font-size:12px">No work items yet</div>
+                    {:else}
+                        {@const C = 2 * Math.PI * 60}
+                        {@const segs = STS.map(s => ({ label:s, count:dashboardData.statusCounts[s]||0, color:STATUS_COLORS[s] })).filter(x => x.count > 0)}
+                        <div style="display:flex; align-items:center; gap:20px">
+                            <svg width="160" height="160" viewBox="0 0 160 160" style="flex-shrink:0">
+                                <circle cx="80" cy="80" r="60" fill="none" stroke="var(--border)" stroke-width="22" />
+                                {#each segs as seg, i}
+                                    {@const prior = segs.slice(0,i).reduce((s,x) => s + x.count, 0)}
+                                    {@const offset = (prior / dashboardData.total) * C}
+                                    {@const len = (seg.count / dashboardData.total) * C}
+                                    <circle cx="80" cy="80" r="60" fill="none"
+                                        stroke={seg.color} stroke-width="22"
+                                        stroke-dasharray="{len} {C - len}"
+                                        stroke-dashoffset={-offset}
+                                        transform="rotate(-90 80 80)" />
+                                {/each}
+                                <text x="80" y="76" text-anchor="middle" style="font-size:24px; font-weight:700; fill:var(--text)">{dashboardData.total}</text>
+                                <text x="80" y="94" text-anchor="middle" style="font-size:10px; fill:var(--text-muted)">items</text>
+                            </svg>
+                            <div style="flex:1; display:flex; flex-direction:column; gap:6px">
+                                {#each STS as s}
+                                    {@const cnt = dashboardData.statusCounts[s] || 0}
+                                    {@const pct = dashboardData.total > 0 ? Math.round((cnt / dashboardData.total) * 100) : 0}
+                                    <div style="display:flex; align-items:center; gap:8px; font-size:12px">
+                                        <span style="width:10px; height:10px; border-radius:2px; background:{STATUS_COLORS[s]}"></span>
+                                        <span style="flex:1">{s}</span>
+                                        <span style="color:var(--text-muted); font-size:11px">{pct}%</span>
+                                        <b style="min-width:24px; text-align:right">{cnt}</b>
+                                    </div>
+                                {/each}
+                            </div>
+                        </div>
+                    {/if}
+                </div>
+
+                <!-- Priority breakdown -->
+                <div class="card">
+                    <h3 style="font-size:14px; font-weight:700; margin-bottom:16px">Priority Breakdown</h3>
+                    {#if dashboardData.total === 0}
+                        <div style="text-align:center; color:var(--text-muted); padding:24px; font-size:12px">No work items yet</div>
+                    {:else}
+                        {@const maxP = Math.max(...Object.values(dashboardData.priorityCounts), 1)}
+                        <div style="display:flex; flex-direction:column; gap:10px">
+                            {#each PRI as p}
+                                {@const cnt = dashboardData.priorityCounts[p] || 0}
+                                {@const w = (cnt / maxP) * 100}
+                                {@const pct = dashboardData.total > 0 ? Math.round((cnt / dashboardData.total) * 100) : 0}
+                                <div>
+                                    <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px">
+                                        <span style="display:flex; align-items:center; gap:6px">
+                                            <span style="width:10px; height:10px; border-radius:2px; background:{PRIORITY_COLORS[p]}"></span>
+                                            {p}
+                                        </span>
+                                        <span><b>{cnt}</b> <span style="color:var(--text-muted); font-size:11px">· {pct}%</span></span>
+                                    </div>
+                                    <div style="height:10px; background:var(--border); border-radius:5px; overflow:hidden">
+                                        <div style="height:100%; width:{w}%; background:{PRIORITY_COLORS[p]}; transition:width .25s"></div>
+                                    </div>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
+                </div>
+            </div>
+
+            <!-- Recent Activity + Project Discussion -->
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px">
+                <div class="card">
+                    <h3 style="font-size:14px; font-weight:700; margin-bottom:12px">🕒 Recent Activity</h3>
+                    {#if !project.activity || project.activity.length === 0}
+                        <div style="text-align:center; color:var(--text-muted); padding:20px; font-size:12px">No activity yet</div>
+                    {:else}
+                        <div style="display:flex; flex-direction:column; gap:10px; max-height:340px; overflow-y:auto">
+                            {#each project.activity.slice(0, 20) as a}
+                                <div style="display:flex; gap:10px; font-size:12px; padding-bottom:8px; border-bottom:1px solid var(--border)">
+                                    <div style="flex-shrink:0; width:32px; height:32px; border-radius:50%; background:var(--info-bg); color:var(--info-text); display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700">
+                                        {(a.user_name || '?').split(' ').map(x=>x[0]).slice(0,2).join('')}
+                                    </div>
+                                    <div style="flex:1; min-width:0">
+                                        <div><b>{a.user_name || 'Someone'}</b> <span style="color:var(--text-muted)">· {relTime(a.created_at)}</span></div>
+                                        <div style="color:var(--text-muted); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">{a.description || a.action}</div>
+                                    </div>
+                                </div>
+                            {/each}
+                        </div>
+                    {/if}
+                </div>
+                <div class="card">
+                    <h3 style="font-size:14px; font-weight:700; margin-bottom:12px">💬 Project Discussion</h3>
+                    <div style="display:flex; flex-direction:column; gap:10px; max-height:280px; overflow-y:auto; margin-bottom:12px">
+                        {#if !project.comments || project.comments.length === 0}
+                            <div style="text-align:center; color:var(--text-muted); padding:20px; font-size:12px">No discussion yet — start the conversation below.</div>
+                        {:else}
+                            {#each project.comments as c}
+                                <div style="display:flex; gap:10px; font-size:12px">
+                                    <div style="flex-shrink:0; width:32px; height:32px; border-radius:50%; background:var(--info-bg); color:var(--info-text); display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700">
+                                        {(c.user_name || '?').split(' ').map(x=>x[0]).slice(0,2).join('')}
+                                    </div>
+                                    <div style="flex:1; min-width:0; background:var(--bg-hover); padding:8px 10px; border-radius:8px">
+                                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px">
+                                            <b style="font-size:12px">{c.user_name}</b>
+                                            <span style="font-size:10px; color:var(--text-muted)">{relTime(c.created_at)}</span>
+                                            {#if c.user_id === user?.id || user?.role === 'admin'}
+                                                <button class="xb dl" style="margin-left:auto; font-size:11px" title="Delete" on:click={() => deleteComment(c)}>✕</button>
+                                            {/if}
+                                        </div>
+                                        <div style="white-space:pre-wrap; word-break:break-word">{c.content}</div>
+                                    </div>
+                                </div>
+                            {/each}
+                        {/if}
+                    </div>
+                    <form on:submit|preventDefault={postComment} style="display:flex; gap:6px">
+                        <input class="input input-sm" placeholder="Write a comment..." bind:value={newComment} disabled={postingComment} style="flex:1" />
+                        <button class="btn btn-primary btn-sm" type="submit" disabled={!newComment.trim() || postingComment}>
+                            {postingComment ? '...' : 'Post'}
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Unassigned + Overdue -->
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px">
+                <div class="card">
+                    <h3 style="font-size:14px; font-weight:700; margin-bottom:6px">
+                        ⚠️ Unassigned Work
+                        <span style="font-size:11px; color:var(--text-muted); font-weight:500">· {unassignedLeaves.length} item{unassignedLeaves.length===1?'':'s'}</span>
+                    </h3>
+                    <div style="font-size:11px; color:var(--text-muted); margin-bottom:12px">Leaf work items with no assignee.</div>
+                    {#if unassignedLeaves.length === 0}
+                        <div style="text-align:center; color:var(--text-muted); padding:20px; font-size:12px">✅ Everything is assigned</div>
+                    {:else}
+                        <div style="display:flex; flex-direction:column; gap:6px; max-height:300px; overflow-y:auto">
+                            {#each unassignedLeaves.slice(0, 25) as it}
+                                <div style="display:flex; align-items:center; gap:8px; padding:6px 8px; background:var(--bg-hover); border-radius:6px; font-size:12px">
+                                    <span class={pcl(it.priority)} style="font-size:9px; flex-shrink:0">{it.priority}</span>
+                                    <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" title={it.name}>{it.name || '—'}</span>
+                                    <span style="font-size:10px; color:var(--text-muted); flex-shrink:0">{it.phase_name}</span>
+                                </div>
+                            {/each}
+                            {#if unassignedLeaves.length > 25}
+                                <div style="text-align:center; color:var(--text-muted); font-size:11px; padding:4px">… and {unassignedLeaves.length - 25} more</div>
+                            {/if}
+                        </div>
+                    {/if}
+                </div>
+                <div class="card">
+                    <h3 style="font-size:14px; font-weight:700; margin-bottom:6px">
+                        🔴 Overdue
+                        <span style="font-size:11px; color:var(--text-muted); font-weight:500">· {overdueLeaves.length} item{overdueLeaves.length===1?'':'s'}</span>
+                    </h3>
+                    <div style="font-size:11px; color:var(--text-muted); margin-bottom:12px">Planned end date passed and not yet completed.</div>
+                    {#if overdueLeaves.length === 0}
+                        <div style="text-align:center; color:var(--text-muted); padding:20px; font-size:12px">✅ Nothing overdue</div>
+                    {:else}
+                        <div style="display:flex; flex-direction:column; gap:6px; max-height:300px; overflow-y:auto">
+                            {#each overdueLeaves.slice(0, 25) as it}
+                                {@const daysLate = Math.floor((Date.now() - new Date(it.planned_end).getTime()) / 86400000)}
+                                <div style="display:flex; align-items:center; gap:8px; padding:6px 8px; background:#fff1f2; border-left:3px solid #dc2626; border-radius:6px; font-size:12px">
+                                    <span class={pcl(it.priority)} style="font-size:9px; flex-shrink:0">{it.priority}</span>
+                                    <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" title={it.name}>{it.name || '—'}</span>
+                                    <span style="font-size:10px; color:#991b1b; font-weight:600; flex-shrink:0">{daysLate}d late</span>
+                                    <span style="font-size:10px; color:var(--text-muted); flex-shrink:0">{it.assignee_name || 'Unassigned'}</span>
+                                </div>
+                            {/each}
+                            {#if overdueLeaves.length > 25}
+                                <div style="text-align:center; color:var(--text-muted); font-size:11px; padding:4px">… and {overdueLeaves.length - 25} more</div>
+                            {/if}
+                        </div>
+                    {/if}
+                </div>
+            </div>
+
+            <!-- Team workload — full width, stacked bars per assignee -->
+            <div class="card" style="margin-top:16px">
+                <h3 style="font-size:14px; font-weight:700; margin-bottom:6px">Team Workload</h3>
+                <div style="font-size:11px; color:var(--text-muted); margin-bottom:14px">
+                    Work items per person, segmented by status. Excludes Backlog.
+                </div>
+                {#if dashboardData.assignees.length === 0}
+                    <div style="text-align:center; color:var(--text-muted); padding:24px; font-size:12px">No assigned work items yet</div>
+                {:else}
+                    {@const maxA = Math.max(...dashboardData.assignees.map(a => a.total), 1)}
+                    <!-- Legend -->
+                    <div style="display:flex; gap:14px; flex-wrap:wrap; margin-bottom:14px; font-size:11px">
+                        {#each STS as s}
+                            <span style="display:flex; align-items:center; gap:5px">
+                                <span style="width:10px; height:10px; border-radius:2px; background:{STATUS_COLORS[s]}"></span>{s}
+                            </span>
+                        {/each}
+                    </div>
+                    <div style="display:flex; flex-direction:column; gap:10px">
+                        {#each dashboardData.assignees as a}
+                            <div>
+                                <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px">
+                                    <span style="font-weight:500">{a.name}</span>
+                                    <span><b>{a.total}</b> <span style="color:var(--text-muted); font-size:11px">item{a.total===1?'':'s'}</span></span>
+                                </div>
+                                <div style="display:flex; height:14px; background:var(--border); border-radius:4px; overflow:hidden; width:{(a.total / maxA) * 100}%; min-width:60px">
+                                    {#each STS as s}
+                                        {@const seg = a.statuses[s] || 0}
+                                        {#if seg > 0}
+                                            <div style="background:{STATUS_COLORS[s]}; width:{(seg / a.total) * 100}%; transition:width .25s"
+                                                title="{s}: {seg}"></div>
+                                        {/if}
+                                    {/each}
+                                </div>
+                            </div>
+                        {/each}
+                    </div>
+                {/if}
+            </div>
+
+        <!-- BACKLOG -->
+        {:else if activeTab==='backlog'}
+            {@const backlogTasks = backlogPhase?.tasks || []}
+            <div class="card" style="margin-bottom:16px">
+                <div style="display:flex; align-items:flex-start; gap:12px; flex-wrap:wrap">
+                    <div style="flex:1; min-width:240px">
+                        <h3 style="font-size:14px; font-weight:700; margin-bottom:4px">📥 Backlog</h3>
+                        <div style="font-size:12px; color:var(--text-muted)">
+                            Dump ideas, bugs, and unscoped work here. Promote items into a real Phase when ready,
+                            or pull them straight into a Sprint. Backlog items don't affect the project % until moved.
+                        </div>
+                    </div>
+                    {#if canEdit && backlogPhase}
+                        <form on:submit|preventDefault={e => { const fd=new FormData(e.target); const v=fd.get('bn'); if(v?.trim()){ addBacklogTask(v.trim()); e.target.reset(); } }}
+                            style="display:flex; gap:6px">
+                            <input class="input input-sm" name="bn" placeholder="Add a backlog item..." style="min-width:220px" />
+                            <button class="btn btn-primary btn-sm" type="submit">＋ Add</button>
+                        </form>
+                    {/if}
+                </div>
+                <div style="margin-top:10px; font-size:11px; color:var(--text-muted)">
+                    {backlogTasks.length} item{backlogTasks.length===1?'':'s'} in backlog
+                </div>
+            </div>
+
+            {#if !backlogPhase}
+                <div class="card" style="text-align:center; color:var(--text-muted)">
+                    This project has no Backlog phase. Re-open the project — one should be created automatically.
+                </div>
+            {:else if backlogTasks.length === 0}
+                <div class="card" style="text-align:center; color:var(--text-muted); padding:40px">
+                    Backlog is empty. Add an item above to get started.
+                </div>
+            {:else}
+                <div class="table-container" style="overflow:auto">
+                    <table style="min-width:900px">
+                        <thead><tr>
+                            <th style="min-width:280px">Item</th>
+                            <th style="width:160px">Assignee</th>
+                            <th style="width:115px">Status</th>
+                            <th style="width:105px">Priority</th>
+                            <th style="width:80px">Points</th>
+                            <th style="width:170px">Promote to Phase</th>
+                            <th style="width:170px">Sprint</th>
+                            <th style="width:50px">Act</th>
+                        </tr></thead>
+                        <tbody>
+                            {#each backlogTasks as t (t.id)}
+                                <tr>
+                                    <td><textarea class="ii" rows="1" on:input={autoResize}
+                                            on:change={e => updateTask(t,'name',e.target.value)}>{t.name}</textarea></td>
+                                    <td>
+                                        {#if canEdit}
+                                            <select class="input input-sm" bind:value={t.assigned_to} on:change={() => updateTask(t,'assigned_to',t.assigned_to)}>
+                                                <option value={null}>—</option>
+                                                {#each users as u}<option value={u.id}>{u.full_name}</option>{/each}
+                                            </select>
+                                        {:else}<span class="dm">{t.assignee_name||'—'}</span>{/if}
+                                    </td>
+                                    <td>
+                                        <select class="input input-sm sel-status {sCls(t.status)}" value={t.status} on:change={e => updateTask(t,'status',e.target.value)}>
+                                            {#each STS as s}<option>{s}</option>{/each}
+                                        </select>
+                                    </td>
+                                    <td>
+                                        <select class="input input-sm sel-priority {pCls(t.priority)}" value={t.priority} on:change={e => updateTask(t,'priority',e.target.value)}>
+                                            {#each PRI as p}<option>{p}</option>{/each}
+                                        </select>
+                                    </td>
+                                    <td>
+                                        <input type="number" min="0" step="0.5" class="input input-sm no-spin" style="width:60px; text-align:center"
+                                            value={t.story_points ?? ''} on:change={e => updateTask(t,'story_points', e.target.value===''?null:parseFloat(e.target.value))} />
+                                    </td>
+                                    <td>
+                                        {#if canEdit && wbsPhases.length}
+                                            <select class="input input-sm" value="" on:change={e => { if(e.target.value){ moveTaskToPhase(t, parseInt(e.target.value)); e.target.value=''; } }}>
+                                                <option value="">→ Move to...</option>
+                                                {#each wbsPhases as ph}<option value={ph.id}>{ph.name}</option>{/each}
+                                            </select>
+                                        {:else}<span class="dm">—</span>{/if}
+                                    </td>
+                                    <td>
+                                        {#if canEdit}
+                                            <select class="input input-sm" value={t.sprint_id ?? ''} on:change={e => assignTaskToSprint(t, e.target.value===''?null:parseInt(e.target.value))}>
+                                                <option value="">— None —</option>
+                                                {#each sprints.filter(s => s.status !== 'Completed' && s.status !== 'Cancelled') as s}
+                                                    <option value={s.id}>{s.name}{s.status==='Active'?' (Active)':''}</option>
+                                                {/each}
+                                            </select>
+                                        {:else}<span class="dm">{sprints.find(s=>s.id===t.sprint_id)?.name||'—'}</span>{/if}
+                                    </td>
+                                    <td style="text-align:center">
+                                        <button class="xb" title="Details" on:click={() => openPanel('task',t)}>📋</button>
+                                        {#if canEdit}<button class="xb dl" on:click={() => deleteTask(backlogPhase, backlogPhase.tasks.indexOf(t))}>✕</button>{/if}
+                                    </td>
+                                </tr>
+                            {/each}
+                        </tbody>
+                    </table>
+                </div>
+            {/if}
+
+        <!-- SPRINTS -->
+        {:else if activeTab==='sprints'}
+            <div class="card" style="margin-bottom:16px">
+                <div style="display:flex; align-items:flex-start; gap:12px; flex-wrap:wrap">
+                    <div style="flex:1; min-width:240px">
+                        <h3 style="font-size:14px; font-weight:700; margin-bottom:4px">🏁 Sprints</h3>
+                        <div style="font-size:12px; color:var(--text-muted)">
+                            Time-boxed iterations. Pull tasks from the Backlog (or any Phase) into a sprint
+                            to commit to finishing them this cycle. Only one sprint can be Active at a time.
+                        </div>
+                    </div>
+                    {#if canEdit}
+                        <form on:submit|preventDefault={e => { const fd=new FormData(e.target); createSprint(fd.get('sn'), fd.get('ss'), fd.get('se'), fd.get('sg')); e.target.reset(); }}
+                            style="display:flex; gap:6px; flex-wrap:wrap; align-items:center">
+                            <input class="input input-sm" name="sn" placeholder="Sprint name..." required style="min-width:140px" />
+                            <input class="input input-sm" name="ss" type="date" title="Start" />
+                            <input class="input input-sm" name="se" type="date" title="End" />
+                            <input class="input input-sm" name="sg" placeholder="Goal (optional)" style="min-width:160px" />
+                            <button class="btn btn-primary btn-sm" type="submit">＋ Create</button>
+                        </form>
+                    {/if}
+                </div>
+            </div>
+
+            {#if sprints.length === 0}
+                <div class="card" style="text-align:center; color:var(--text-muted); padding:40px">
+                    No sprints yet. Create one above to start planning.
+                </div>
+            {:else}
+                <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(360px, 1fr)); gap:16px">
+                    {#each sprints as sprint (sprint.id)}
+                        {@const sprintTasks = allTasksFlat().filter(({task}) => task.sprint_id === sprint.id)}
+                        {@const pct = sprint.total_points > 0
+                            ? Math.round((sprint.done_points / sprint.total_points) * 100)
+                            : (sprint.task_count > 0 ? Math.round((sprint.task_done / sprint.task_count) * 100) : 0)}
+                        <div class="card" style="border-left:4px solid {sprint.status==='Active'?'#22c55e':sprint.status==='Completed'?'#94a3b8':'#3b82f6'}">
+                            <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px">
+                                <input class="ii" style="font-weight:700; font-size:14px; flex:1" value={sprint.name}
+                                    on:change={e => updateSprint(sprint,'name',e.target.value)} disabled={!canEdit} />
+                                {#if canEdit}
+                                    <select class="input input-sm" value={sprint.status} on:change={e => updateSprint(sprint,'status',e.target.value)} style="width:auto">
+                                        <option>Planned</option><option>Active</option><option>Completed</option><option>Cancelled</option>
+                                    </select>
+                                    <button class="xb dl" title="Delete sprint" on:click={() => deleteSprint(sprint)}>✕</button>
+                                {:else}
+                                    <span class="badge">{sprint.status}</span>
+                                {/if}
+                            </div>
+                            <div style="display:flex; gap:8px; font-size:11px; color:var(--text-muted); margin-bottom:8px">
+                                <input class="input input-sm" type="date" value={toD(sprint.start_date)}
+                                    on:change={e => updateSprint(sprint,'start_date',e.target.value)} disabled={!canEdit} style="font-size:11px" />
+                                <span>→</span>
+                                <input class="input input-sm" type="date" value={toD(sprint.end_date)}
+                                    on:change={e => updateSprint(sprint,'end_date',e.target.value)} disabled={!canEdit} style="font-size:11px" />
+                            </div>
+                            <input class="ii" style="font-size:12px; color:var(--text-muted); width:100%; margin-bottom:10px"
+                                placeholder="Sprint goal..." value={sprint.goal||''}
+                                on:change={e => updateSprint(sprint,'goal',e.target.value)} disabled={!canEdit} />
+                            <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px">
+                                {sprint.task_done}/{sprint.task_count} tasks done
+                                {#if sprint.total_points > 0} · {sprint.done_points}/{sprint.total_points} pts{/if}
+                            </div>
+                            <div class="progress-bar" style="margin-bottom:12px">
+                                <div class="progress-bar-track" style="height:6px">
+                                    <div class="progress-bar-fill" style="width:{pct}%; background:{pCol(pct)}; height:100%"></div>
+                                </div>
+                                <span class="progress-bar-label">{pct}%</span>
+                            </div>
+                            <div style="max-height:200px; overflow-y:auto; border-top:1px solid var(--border); padding-top:8px">
+                                {#each sprintTasks as { task, phase } (task.id)}
+                                    <div style="display:flex; align-items:center; gap:6px; padding:4px 0; font-size:12px">
+                                        <span class={sc(task.status)} style="font-size:9px; flex-shrink:0">{task.status}</span>
+                                        <span style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" title={task.name}>{task.name||'—'}</span>
+                                        <span class={pcl(task.priority)} style="font-size:9px; flex-shrink:0">{task.priority}</span>
+                                        {#if !phase.is_backlog}<span style="font-size:9px; color:var(--text-muted)" title="Phase">[{phase.name}]</span>{/if}
+                                        {#if canEdit}<button class="xb" title="Remove from sprint" on:click={() => assignTaskToSprint(task, null)}>✕</button>{/if}
+                                    </div>
+                                {/each}
+                                {#if sprintTasks.length === 0}
+                                    <div style="text-align:center; color:var(--text-light); font-size:11px; padding:8px">
+                                        No tasks. Add from Backlog or any task's sprint picker.
+                                    </div>
+                                {/if}
+                            </div>
+                        </div>
+                    {/each}
+                </div>
+            {/if}
 
         <!-- WBS -->
         {:else if activeTab==='wbs'}
-            {@const tw = phases.reduce((s,p) => s+parseFloat(p.weight||0),0)}
+            {@const tw = wbsPhases.reduce((s,p) => s+parseFloat(p.weight||0),0)}
             <div class="flex items-center gap-5 card" style="margin-bottom:16px">
                 <div style="flex:1"><div style="font-size:12px; color:var(--text-muted); margin-bottom:6px">Overall</div><div class="progress-bar"><div class="progress-bar-track" style="height:10px"><div class="progress-bar-fill" style="width:{projectProgress}%; background:{pCol(projectProgress)}; height:100%"></div></div><span class="progress-bar-label">{Math.round(projectProgress)}%</span></div></div>
                 <div style="text-align:center; padding:0 16px; border-left:1px solid var(--border)"><div style="font-size:11px; color:var(--text-muted)">Weight</div><div style="font-size:20px; font-weight:700; color:{tw===100?'var(--success-text)':'var(--danger-text)'}">{tw}%</div></div>
@@ -742,7 +1427,7 @@
                         <th style="width:90px">Progress</th><th style="width:40px; text-align:center">📎</th><th style="width:55px; text-align:center">Act</th>
                     </tr></thead>
                     <tbody>
-                        {#each phases as phase, pi}
+                        {#each wbsPhases as phase, pi}
                             {@const _pp=phP(phase)}
                             {@const _ps=effStatus(phase)}
                             <tr style="background:#eef2ff; border-left:4px solid #4f46e5">
@@ -768,7 +1453,7 @@
                                 {/if}
                                 <td><div class="progress-bar"><div class="progress-bar-track"><div class="progress-bar-fill" style="width:{_pp}%; background:{pCol(_pp)}; height:100%"></div></div><span class="progress-bar-label">{Math.round(_pp)}%</span></div></td>
                                 <td style="text-align:center"><button class="xb" title="Details" on:click={() => openPanel('phase',phase)}>{hasDetails(phase)?'📝':'📋'}</button></td>
-                                <td style="text-align:center"><button class="xb" on:click={() => addTask(phase)}>＋</button><button class="xb dl" on:click={() => deletePhase(pi)}>✕</button></td>
+                                <td style="text-align:center"><button class="xb" on:click={() => addTask(phase)}>＋</button><button class="xb dl" on:click={() => deletePhase(phase)}>✕</button></td>
                             </tr>
                             {#if exp['p'+phase.id]}
                                 {#each phase.tasks||[] as task, ti}
@@ -865,14 +1550,37 @@
 
         <!-- KANBAN -->
         {:else if activeTab==='kanban'}
-            {@const ki=getKanban()}
+            {@const _kfilter = kanbanSprintFilter}
+            {@const ki=(kanbanSprintFilter, getKanban())}
             {@const cols=['Not Started','In Progress','Completed','On Hold']}
             {@const cc={'Not Started':'#94a3b8','In Progress':'#3b82f6','Completed':'#22c55e','On Hold':'#eab308'}}
+            <div class="card" style="margin-bottom:12px; display:flex; align-items:center; gap:10px; flex-wrap:wrap">
+                <span style="font-size:12px; color:var(--text-muted)">Sprint filter:</span>
+                <select class="input input-sm" bind:value={kanbanSprintFilter} style="width:auto">
+                    <option value="all">All tasks</option>
+                    <option value="none">No sprint (incl. backlog)</option>
+                    {#each sprints as s}<option value={String(s.id)}>{s.name}{s.status==='Active'?' · Active':''}</option>{/each}
+                </select>
+                <span style="font-size:11px; color:var(--text-muted); margin-left:auto">{ki.length} card{ki.length===1?'':'s'}</span>
+            </div>
             <div class="kanban-board" style="grid-template-columns:repeat(4,1fr)">
                 {#each cols as col}{@const ci=ki.filter(i=>i.status===col)}
                     <div class="kanban-column">
                         <div class="flex items-center gap-2" style="margin-bottom:12px"><span style="width:8px; height:8px; border-radius:50%; background:{cc[col]}"></span><b style="font-size:13px">{col}</b><span style="font-size:11px; color:var(--text-muted); margin-left:auto; background:var(--border); padding:1px 8px; border-radius:99px">{ci.length}</span></div>
-                        {#each ci as item}<div class="kanban-card" style="margin-bottom:8px"><div style="font-size:12px; font-weight:600; margin-bottom:4px">{item.name||'—'}</div><div style="font-size:10px; color:var(--text-muted); margin-bottom:8px">{item.pn}{item.tn?` → ${item.tn}`:''}</div><div class="flex items-center gap-2">{#if item.assignee_name}<span style="font-size:10px; background:var(--info-bg); color:var(--info-text); padding:2px 6px; border-radius:4px">{item.assignee_name}</span>{/if}<span class={pcl(item.priority)} style="font-size:9px">{item.priority}</span></div></div>{/each}
+                        {#each ci as item}
+                            {@const _sn = item.sprint_id ? (sprints.find(s=>s.id===item.sprint_id)?.name) : null}
+                            <div class="kanban-card" class:is-urgent={item.priority==='Urgent'} style="margin-bottom:8px">
+                                <div style="font-size:12px; font-weight:600; margin-bottom:4px">{item.name||'—'}</div>
+                                <div style="font-size:10px; color:var(--text-muted); margin-bottom:8px">
+                                    {item.isBacklog?'📥 Backlog':item.pn}{item.tn?` → ${item.tn}`:''}
+                                </div>
+                                <div class="flex items-center gap-2" style="flex-wrap:wrap">
+                                    {#if item.assignee_name}<span style="font-size:10px; background:var(--info-bg); color:var(--info-text); padding:2px 6px; border-radius:4px">{item.assignee_name}</span>{/if}
+                                    <span class={pcl(item.priority)} style="font-size:9px">{item.priority}</span>
+                                    {#if _sn}<span style="font-size:9px; background:#ecfeff; color:#0e7490; padding:2px 6px; border-radius:4px">🏁 {_sn}</span>{/if}
+                                </div>
+                            </div>
+                        {/each}
                         {#if ci.length===0}<div style="text-align:center; padding:20px; color:var(--text-light); font-size:12px">No items</div>{/if}
                     </div>
                 {/each}
@@ -1220,6 +1928,8 @@
     .sel-priority.p-medium { background-color:#dbeafe; color:#1e40af; border-color:#93c5fd; }
     .sel-priority.p-high { background-color:#fed7aa; color:#9a3412; border-color:#fdba74; }
     .sel-priority.p-critical { background-color:#fee2e2; color:#991b1b; border-color:#fca5a5; }
+    .sel-priority.p-urgent { background-color:#7f1d1d; color:#fef2f2; border-color:#7f1d1d; font-weight:700; }
+    .kanban-card.is-urgent { border-left:4px solid #dc2626; background:#fff1f2; }
     .check-edit {
         flex: 1; font-size: 13px; padding: 2px 4px;
         border: 1px solid transparent; border-radius: 4px;

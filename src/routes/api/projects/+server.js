@@ -57,6 +57,12 @@ export async function POST({ request, locals }) {
         );
         const projId = result.insertId;
 
+        // Every project gets a Backlog phase (weight 0, doesn't affect progress)
+        await conn.execute(
+            'INSERT INTO phases (project_id, name, is_backlog, weight, sort_order) VALUES (?, ?, TRUE, 0, -1)',
+            [projId, 'Backlog']
+        );
+
         // If template selected, create phases from template
         if (template_id) {
             const [templateItems] = await conn.execute(

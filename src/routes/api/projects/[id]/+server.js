@@ -76,6 +76,21 @@ export async function GET({ params, locals }) {
 
     project.phases = phases;
 
+    // Load sprints with rollup counts
+    project.sprints = await query(
+        `SELECT s.*,
+                (SELECT COUNT(*) FROM tasks WHERE sprint_id = s.id) AS task_count,
+                (SELECT COUNT(*) FROM tasks WHERE sprint_id = s.id AND status = 'Completed') AS task_done,
+                (SELECT COALESCE(SUM(story_points), 0) FROM tasks WHERE sprint_id = s.id) AS total_points,
+                (SELECT COALESCE(SUM(story_points), 0) FROM tasks WHERE sprint_id = s.id AND status = 'Completed') AS done_points
+         FROM sprints s
+         WHERE s.project_id = ?
+         ORDER BY
+            CASE s.status WHEN 'Active' THEN 0 WHEN 'Planned' THEN 1 WHEN 'Completed' THEN 2 ELSE 3 END,
+            s.start_date, s.id`,
+        [params.id]
+    );
+
     // Load recent activity
     project.activity = await query(
         `SELECT al.*, u.full_name as user_name
@@ -93,6 +108,16 @@ export async function GET({ params, locals }) {
         [params.id]
     );
     project.attachment_count = attachCount?.count || 0;
+
+    // Load project-level discussion comments (entity_type='project', entity_id=project.id)
+    project.comments = await query(
+        `SELECT c.*, u.full_name as user_name, u.email as user_email, u.avatar_url
+         FROM comments c
+         JOIN users u ON c.user_id = u.id
+         WHERE c.project_id = ? AND c.entity_type = 'project' AND c.entity_id = ?
+         ORDER BY c.created_at ASC`,
+        [params.id, params.id]
+    );
 
     return json(project);
 }

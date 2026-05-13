@@ -141,7 +141,7 @@ export async function PATCH({ params, request, locals }) {
     // Build dynamic update
     const allowedByType = {
         phase: ['name', 'weight', 'sort_order', 'planned_start', 'planned_end', 'actual_start', 'actual_end', 'notes'],
-        task: ['name', 'description', 'assigned_to', 'status', 'priority', 'planned_start', 'planned_end', 'actual_start', 'actual_end', 'sort_order', 'notes'],
+        task: ['name', 'description', 'assigned_to', 'status', 'priority', 'planned_start', 'planned_end', 'actual_start', 'actual_end', 'sort_order', 'notes', 'sprint_id', 'story_points', 'phase_id'],
         sub_task: ['name', 'description', 'assigned_to', 'status', 'priority', 'planned_start', 'planned_end', 'actual_start', 'actual_end', 'sort_order', 'notes'],
         sub_sub_task: ['name', 'description', 'assigned_to', 'status', 'priority', 'planned_start', 'planned_end', 'actual_start', 'actual_end', 'sort_order', 'notes'],
         checklist: ['title', 'is_checked', 'sort_order']

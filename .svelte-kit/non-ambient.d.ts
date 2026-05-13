@@ -29,27 +29,33 @@ declare module "$app/types" {
 	type MatcherParam<M> = M extends (param : string) => param is (infer U extends string) ? U : string;
 
 	export interface AppTypes {
-		RouteId(): "/(app)" | "/" | "/(app)/admin" | "/api" | "/api/auth" | "/api/my-tasks" | "/api/projects" | "/api/projects/[id]" | "/api/projects/[id]/attachments" | "/api/projects/[id]/attachments/[attachmentId]" | "/api/projects/[id]/phases" | "/api/projects/[id]/wbs" | "/api/users" | "/login" | "/(app)/my-tasks" | "/(app)/projects" | "/(app)/projects/[id]";
+		RouteId(): "/(app)" | "/" | "/(app)/admin" | "/api" | "/api/auth" | "/api/my-tasks" | "/api/projects" | "/api/projects/[id]" | "/api/projects/[id]/attachments" | "/api/projects/[id]/attachments/[attachmentId]" | "/api/projects/[id]/comments" | "/api/projects/[id]/phases" | "/api/projects/[id]/sprints" | "/api/projects/[id]/sprints/[sprintId]" | "/api/projects/[id]/wbs" | "/api/users" | "/login" | "/(app)/my-tasks" | "/(app)/projects" | "/(app)/projects/[id]";
 		RouteParams(): {
 			"/api/projects/[id]": { id: string };
 			"/api/projects/[id]/attachments": { id: string };
 			"/api/projects/[id]/attachments/[attachmentId]": { id: string; attachmentId: string };
+			"/api/projects/[id]/comments": { id: string };
 			"/api/projects/[id]/phases": { id: string };
+			"/api/projects/[id]/sprints": { id: string };
+			"/api/projects/[id]/sprints/[sprintId]": { id: string; sprintId: string };
 			"/api/projects/[id]/wbs": { id: string };
 			"/(app)/projects/[id]": { id: string }
 		};
 		LayoutParams(): {
 			"/(app)": { id?: string };
-			"/": { id?: string; attachmentId?: string };
+			"/": { id?: string; attachmentId?: string; sprintId?: string };
 			"/(app)/admin": Record<string, never>;
-			"/api": { id?: string; attachmentId?: string };
+			"/api": { id?: string; attachmentId?: string; sprintId?: string };
 			"/api/auth": Record<string, never>;
 			"/api/my-tasks": Record<string, never>;
-			"/api/projects": { id?: string; attachmentId?: string };
-			"/api/projects/[id]": { id: string; attachmentId?: string };
+			"/api/projects": { id?: string; attachmentId?: string; sprintId?: string };
+			"/api/projects/[id]": { id: string; attachmentId?: string; sprintId?: string };
 			"/api/projects/[id]/attachments": { id: string; attachmentId?: string };
 			"/api/projects/[id]/attachments/[attachmentId]": { id: string; attachmentId: string };
+			"/api/projects/[id]/comments": { id: string };
 			"/api/projects/[id]/phases": { id: string };
+			"/api/projects/[id]/sprints": { id: string; sprintId?: string };
+			"/api/projects/[id]/sprints/[sprintId]": { id: string; sprintId: string };
 			"/api/projects/[id]/wbs": { id: string };
 			"/api/users": Record<string, never>;
 			"/login": Record<string, never>;
@@ -57,7 +63,7 @@ declare module "$app/types" {
 			"/(app)/projects": { id?: string };
 			"/(app)/projects/[id]": { id: string }
 		};
-		Pathname(): "/" | "/admin" | "/api/auth" | "/api/my-tasks" | "/api/projects" | `/api/projects/${string}` & {} | `/api/projects/${string}/attachments` & {} | `/api/projects/${string}/attachments/${string}` & {} | `/api/projects/${string}/phases` & {} | `/api/projects/${string}/wbs` & {} | "/api/users" | "/login" | "/my-tasks" | "/projects" | `/projects/${string}` & {};
+		Pathname(): "/" | "/admin" | "/api/auth" | "/api/my-tasks" | "/api/projects" | `/api/projects/${string}` & {} | `/api/projects/${string}/attachments` & {} | `/api/projects/${string}/attachments/${string}` & {} | `/api/projects/${string}/comments` & {} | `/api/projects/${string}/phases` & {} | `/api/projects/${string}/sprints` & {} | `/api/projects/${string}/sprints/${string}` & {} | `/api/projects/${string}/wbs` & {} | "/api/users" | "/login" | "/my-tasks" | "/projects" | `/projects/${string}` & {};
 		ResolvedPathname(): `${"" | `/${string}`}${ReturnType<AppTypes['Pathname']>}`;
 		Asset(): string & {};
 	}

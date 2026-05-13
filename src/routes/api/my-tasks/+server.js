@@ -86,6 +86,38 @@ export async function GET({ locals, url }) {
     // Merge and sort by priority then date
     const allItems = [...tasks, ...subTasks, ...subSubTasks];
 
+    // Attach checklist for each item (one query per type)
+    if (allItems.length) {
+        const groups = { task: [], sub_task: [], sub_sub_task: [] };
+        for (const it of allItems) groups[it.item_type]?.push(it.id);
+
+        const fetchChecklist = async (entityType, ids) => {
+            if (!ids.length) return [];
+            const placeholders = ids.map(() => '?').join(',');
+            return await query(
+                `SELECT id, entity_type, entity_id, title, is_checked, sort_order
+                 FROM checklist_items
+                 WHERE entity_type = ? AND entity_id IN (${placeholders})
+                 ORDER BY entity_id, sort_order`,
+                [entityType, ...ids]
+            );
+        };
+        const [tcl, stcl, sstcl] = await Promise.all([
+            fetchChecklist('task', groups.task),
+            fetchChecklist('sub_task', groups.sub_task),
+            fetchChecklist('sub_sub_task', groups.sub_sub_task)
+        ]);
+        const byKey = new Map();
+        for (const c of [...tcl, ...stcl, ...sstcl]) {
+            const k = c.entity_type + ':' + c.entity_id;
+            if (!byKey.has(k)) byKey.set(k, []);
+            byKey.get(k).push(c);
+        }
+        for (const it of allItems) {
+            it.checklist = byKey.get(it.item_type + ':' + it.id) || [];
+        }
+    }
+
     // Summary counts
     const summary = {
         total: allItems.length,

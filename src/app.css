@@ -171,6 +171,7 @@ body {
 .badge-medium { background: var(--info-bg); color: var(--info-text); }
 .badge-high { background: var(--orange-bg); color: var(--orange); }
 .badge-critical { background: var(--danger-bg); color: var(--danger-text); }
+.badge-urgent { background: #7f1d1d; color: #fef2f2; font-weight: 700; }
 
 /* Health badges */
 .badge-on-track { background: var(--success-bg); color: var(--success-text); }
